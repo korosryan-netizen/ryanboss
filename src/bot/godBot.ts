@@ -1,781 +1,742 @@
-/* GOD Even/Odd bot engine
- * Derived from GOD.xml:
- * - default runs: 2
- * - scans synthetic-index markets
- * - keeps 100 recent ticks
- * - waits for 3 consecutive opposite-parity digits
- * - selects the higher observed parity frequency
- * - stops at target profit or stop loss
- *
- * IMPORTANT: this is a heuristic. It does not guarantee 90% accuracy or profit.
- * Pass an authenticated Deriv WebSocket token at runtime; never hard-code it.
- */
+import { api_base } from '@/external/bot-skeleton/services/api/api-base';
 
 export type GodConfig = {
-  appId: string;
-  token: string;
-  stake: number;
-  targetProfit: number;
-  stopLoss: number;
-  runs?: number;
-  scanWindow?: number;
-  minimumSampleSize?: number;
-  minimumConfidence?: number;
-  maxConfidence?: number;
-  maxMarketsToScan?: number;
-  currency?: string;
-  duration?: number;
+    stake: number;
+    targetProfit: number;
+    stopLoss: number;
+    runs: number;
+    scanWindow?: number;
+    minimumSampleSize?: number;
+    minimumConfidence?: number;
 };
 
-export type MarketScore = {
-  symbol: string;
-  name: string;
-  sampleSize: number;
-  evenRate: number;
-  oddRate: number;
-  confidence: number;
-  score: number;
-  lastDigits: number[];
+export type GodMarket = {
+    symbol: string;
+    name: string;
+    score: number;
+    confidence: number;
+    evenRate: number;
+    oddRate: number;
+    sampleSize: number;
 };
 
 export type GodTradeResult = {
-  symbol: string;
-  contractType: 'DIGITEVEN' | 'DIGITODD';
-  entryDigit?: number;
-  status: 'won' | 'lost' | 'error';
-  profit: number;
-  contractId?: string | number;
-  message: string;
+    symbol: string;
+    contractType: 'DIGITEVEN' | 'DIGITODD';
+    entryDigit: number;
+    profit: number;
+    result: 'profit' | 'loss';
 };
 
-type DerivMessage = Record<string, any>;
+type TradeEngine = any;
 
-const WS_BASE = 'wss://ws.derivws.com/websockets/v3';
+const DEFAULT_CONFIG: Required<GodConfig> = {
+    stake: 1,
+    targetProfit: 0,
+    stopLoss: 0,
+    runs: 2,
+    scanWindow: 100,
+    minimumSampleSize: 50,
+    minimumConfidence: 0.7,
+};
 
+/**
+ * GOD
+ *
+ * Strategy:
+ * 1. Uses the existing Deriv connection.
+ * 2. Scans synthetic markets.
+ * 3. Calculates Even/Odd statistics.
+ * 4. Selects the highest-scoring eligible market.
+ * 5. Waits for 3 consecutive opposite-parity digits.
+ * 6. Uses the existing TradeEngine for execution.
+ *
+ * This class deliberately does NOT create another WebSocket.
+ */
 export class GodBot {
-  private ws: WebSocket | null = null;
-  private stopped = false;
-  private running = false;
-  private cumulativeProfit = 0;
+    private tradeEngine: TradeEngine;
 
-  constructor(
-    private readonly config: GodConfig,
-    private readonly events: {
-      onStatus?: (message: string) => void;
-      onMarket?: (market: MarketScore) => void;
-      onTrade?: (result: GodTradeResult) => void;
-      onProfit?: (profit: number) => void;
-      onError?: (error: Error) => void;
-    } = {},
-  ) {}
+    private config: Required<GodConfig>;
 
-  private emitStatus(message: string) {
-    this.events.onStatus?.(message);
-  }
+    private running = false;
 
-  private emitError(error: unknown) {
-    const err = error instanceof Error ? error : new Error(String(error));
-    this.events.onError?.(err);
-    this.emitStatus(`Error: ${err.message}`);
-  }
+    private currentProfit = 0;
 
-  private request<T extends DerivMessage>(payload: DerivMessage): Promise<T> {
-    return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-        reject(new Error('Deriv WebSocket is not connected.'));
-        return;
-      }
+    private tradesExecuted = 0;
 
-      const reqId = Math.floor(Math.random() * 2_000_000_000);
-      const timer = window.setTimeout(
-        () =>
-          reject(
-            new Error(
-              `Deriv request timed out: ${
-                payload.proposal ? 'proposal' : 'request'
-              }`,
-            ),
-          ),
-        15_000,
-      );
+    private selectedMarket: GodMarket | null = null;
 
-      const handler = (event: MessageEvent) => {
-        let msg: DerivMessage;
+    private stopReason = '';
+
+    constructor(tradeEngine: TradeEngine, config: GodConfig) {
+        this.tradeEngine = tradeEngine;
+
+        this.config = {
+            ...DEFAULT_CONFIG,
+            ...config,
+            runs: Math.max(1, Number(config.runs || 2)),
+            stake: Math.max(0, Number(config.stake || 0)),
+        };
+    }
+
+    /**
+     * Start GOD.
+     */
+    async start(): Promise<void> {
+        if (this.running) return;
+
+        this.running = true;
+        this.currentProfit = 0;
+        this.tradesExecuted = 0;
+        this.stopReason = '';
 
         try {
-          msg = JSON.parse(event.data);
-        } catch {
-          return;
+            for (let run = 0; run < this.config.runs; run += 1) {
+                if (!this.running) break;
+
+                if (this.shouldStop()) break;
+
+                const market = await this.scanMarkets();
+
+                if (!market) {
+                    this.stopReason = 'No valid market reached the confidence threshold.';
+                    break;
+                }
+
+                this.selectedMarket = market;
+
+                console.log(
+                    '[GOD] Selected market:',
+                    market.symbol,
+                    'confidence:',
+                    market.confidence
+                );
+
+                const contractType = await this.waitForSignal(market.symbol);
+
+                if (!this.running || !contractType) break;
+
+                const result = await this.executeUsingTradeEngine(
+                    market.symbol,
+                    contractType
+                );
+
+                if (!result) break;
+
+                this.currentProfit += Number(result.profit || 0);
+                this.tradesExecuted += 1;
+
+                if (result.profit > 0) {
+                    console.log('GOD ABOVE');
+                } else {
+                    console.log('GOD NEVER FAILS');
+                }
+
+                if (this.shouldStop()) break;
+            }
+        } catch (error) {
+            console.error('[GOD] Error:', error);
+            this.stopReason = 'Execution error';
+        } finally {
+            this.running = false;
+        }
+    }
+
+    /**
+     * Stop GOD.
+     */
+    stop(): void {
+        this.running = false;
+        this.stopReason = 'Stopped by user.';
+    }
+
+    isRunning(): boolean {
+        return this.running;
+    }
+
+    getProfit(): number {
+        return this.currentProfit;
+    }
+
+    getTradesExecuted(): number {
+        return this.tradesExecuted;
+    }
+
+    getSelectedMarket(): GodMarket | null {
+        return this.selectedMarket;
+    }
+
+    getStopReason(): string {
+        return this.stopReason;
+    }
+
+    /**
+     * Scan eligible synthetic markets using the existing Deriv API connection.
+     */
+    private async scanMarkets(): Promise<GodMarket | null> {
+        const response = await this.sendRequest({
+            active_symbols: 'brief',
+            product_type: 'basic',
+        });
+
+        const symbols = Array.isArray(response?.active_symbols)
+            ? response.active_symbols
+            : [];
+
+        const candidates = symbols.filter((market: any) => {
+            const symbol = String(market.symbol || '');
+            const marketName = String(market.display_name || '');
+
+            return (
+                market.is_trading &&
+                this.isSynthetic(symbol, marketName)
+            );
+        });
+
+        const scoredMarkets: GodMarket[] = [];
+
+        for (const market of candidates) {
+            if (!this.running) break;
+
+            try {
+                const result = await this.analyseMarket(
+                    market.symbol,
+                    market.display_name || market.symbol
+                );
+
+                if (result) {
+                    scoredMarkets.push(result);
+                }
+            } catch (error) {
+                console.warn(
+                    '[GOD] Could not analyse',
+                    market.symbol,
+                    error
+                );
+            }
         }
 
-        if (msg.req_id !== reqId) return;
+        scoredMarkets.sort((a, b) => b.score - a.score);
 
-        window.clearTimeout(timer);
-        this.ws?.removeEventListener('message', handler);
+        const best = scoredMarkets[0];
 
-        if (msg.error) {
-          reject(new Error(msg.error.message || 'Deriv API error'));
-        } else {
-          resolve(msg as T);
+        if (!best) return null;
+
+        if (best.confidence < this.config.minimumConfidence) {
+            return null;
         }
-      };
 
-      this.ws.addEventListener('message', handler);
-      this.ws.send(JSON.stringify({ ...payload, req_id: reqId }));
-    });
-  }
+        return best;
+    }
 
-  private async connect() {
-    this.ws = new WebSocket(
-      `${WS_BASE}?app_id=${encodeURIComponent(this.config.appId)}`,
-    );
+    /**
+     * Analyse one market.
+     */
+    private async analyseMarket(
+        symbol: string,
+        name: string
+    ): Promise<GodMarket | null> {
+        const response = await this.sendRequest({
+            ticks_history: symbol,
+            count: this.config.scanWindow,
+            end: 'latest',
+            style: 'ticks',
+        });
 
-    await new Promise<void>((resolve, reject) => {
-      if (!this.ws) {
-        return reject(new Error('Unable to create WebSocket.'));
-      }
+        const prices = Array.isArray(response?.history?.prices)
+            ? response.history.prices
+            : [];
 
-      const onOpen = () => {
-        cleanup();
-        resolve();
-      };
+        if (prices.length < this.config.minimumSampleSize) {
+            return null;
+        }
 
-      const onError = () => {
-        cleanup();
-        reject(new Error('Unable to connect to Deriv.'));
-      };
+        const digits = prices.map((price: number) =>
+            this.extractLastDigit(price, symbol)
+        );
 
-      const cleanup = () => {
-        this.ws?.removeEventListener('open', onOpen);
-        this.ws?.removeEventListener('error', onError);
-      };
+        const evenCount = digits.filter(
+            (digit: number) => digit % 2 === 0
+        ).length;
 
-      this.ws.addEventListener('open', onOpen);
-      this.ws.addEventListener('error', onError);
-    });
+        const oddCount = digits.length - evenCount;
 
-    await this.request({
-      authorize: this.config.token,
-    });
+        const evenRate = evenCount / digits.length;
+        const oddRate = oddCount / digits.length;
 
-    this.emitStatus('Connected and authorized with Deriv.');
-  }
+        const parityEdge = Math.max(evenRate, oddRate);
 
-  private async getSyntheticMarkets() {
-    const response = await this.request<any>({
-      active_symbols: 'brief',
-      product_type: 'basic',
-    });
+        const recentDigits = digits.slice(-20);
 
-    const symbols = Array.isArray(response.active_symbols)
-      ? response.active_symbols
-      : [];
+        const recentEven =
+            recentDigits.filter(
+                (digit: number) => digit % 2 === 0
+            ).length / recentDigits.length;
 
-    return symbols
-      .filter((s: any) => {
-        const market = String(s.market || '').toLowerCase();
-        const symbol = String(s.symbol || '');
+        const recentOdd = 1 - recentEven;
+
+        const recentEdge = Math.max(recentEven, recentOdd);
+
+        const streakScore = this.calculateStreakScore(digits);
+
+        const stability = this.calculateStability(digits);
+
+        /**
+         * GOD scoring model from the XML:
+         *
+         * digit frequency  = 0.35
+         * parity frequency = 0.30
+         * streak           = 0.20
+         * stability        = 0.15
+         */
+        const digitFrequencyScore = parityEdge;
+
+        const parityFrequencyScore = recentEdge;
+
+        const score =
+            digitFrequencyScore * 0.35 +
+            parityFrequencyScore * 0.30 +
+            streakScore * 0.20 +
+            stability * 0.15;
+
+        return {
+            symbol,
+            name,
+            score,
+            confidence: Math.min(0.99, Math.max(0, score)),
+            evenRate,
+            oddRate,
+            sampleSize: digits.length,
+        };
+    }
+
+    /**
+     * Wait until 3 consecutive digits of the same parity appear.
+     *
+     * 3 odd digits -> EVEN
+     * 3 even digits -> ODD
+     */
+    private async waitForSignal(
+        symbol: string
+    ): Promise<'DIGITEVEN' | 'DIGITODD' | null> {
+        let consecutiveOdd = 0;
+        let consecutiveEven = 0;
+
+        return new Promise(resolve => {
+            let subscription: any = null;
+            let resolved = false;
+
+            const finish = (value: 'DIGITEVEN' | 'DIGITODD' | null) => {
+                if (resolved) return;
+
+                resolved = true;
+
+                try {
+                    if (subscription) {
+                        subscription.unsubscribe?.();
+                    }
+                } catch {
+                    // Ignore unsubscribe errors.
+                }
+
+                resolve(value);
+            };
+
+            const check = async () => {
+                if (!this.running) {
+                    finish(null);
+                    return;
+                }
+
+                try {
+                    const response = await this.sendRequest({
+                        ticks_history: symbol,
+                        count: 1,
+                        end: 'latest',
+                        style: 'ticks',
+                    });
+
+                    const prices = response?.history?.prices;
+
+                    if (!Array.isArray(prices) || prices.length === 0) {
+                        return;
+                    }
+
+                    const digit = this.extractLastDigit(
+                        prices[prices.length - 1],
+                        symbol
+                    );
+
+                    if (digit % 2 === 0) {
+                        consecutiveEven += 1;
+                        consecutiveOdd = 0;
+                    } else {
+                        consecutiveOdd += 1;
+                        consecutiveEven = 0;
+                    }
+
+                    if (consecutiveOdd >= 3) {
+                        finish('DIGITEVEN');
+                    } else if (consecutiveEven >= 3) {
+                        finish('DIGITODD');
+                    }
+                } catch (error) {
+                    console.warn('[GOD] Signal error:', error);
+                }
+            };
+
+            const interval = window.setInterval(check, 1000);
+
+            subscription = {
+                unsubscribe: () => {
+                    window.clearInterval(interval);
+                },
+            };
+
+            check();
+        });
+    }
+
+    /**
+     * Execute through the EXISTING Deriv TradeEngine.
+     *
+     * No new WebSocket is opened here.
+     */
+    private async executeUsingTradeEngine(
+        symbol: string,
+        contractType: 'DIGITEVEN' | 'DIGITODD'
+    ): Promise<GodTradeResult | null> {
+        if (!this.running) return null;
+
+        try {
+            console.log(
+                '[GOD] Preparing trade:',
+                symbol,
+                contractType
+            );
+
+            /**
+             * Change the existing engine's watched symbol.
+             */
+            await this.tradeEngine.watchTicks(symbol);
+
+            /**
+             * Set the selected symbol on the existing engine.
+             */
+            if (this.tradeEngine.options) {
+                this.tradeEngine.options.symbol = symbol;
+            }
+
+            /**
+             * Configure the stake for the existing engine.
+             */
+            const tradeOptions = {
+                amount: this.config.stake,
+                basis: 'stake',
+                currency:
+                    this.tradeEngine.tradeOptions?.currency ||
+                    this.tradeEngine.accountInfo?.currency ||
+                    'USD',
+                duration: 1,
+                duration_unit: 't',
+                symbol,
+                contract_type: contractType,
+            };
+
+            /**
+             * Start the existing engine.
+             */
+            this.tradeEngine.start(tradeOptions);
+
+            /**
+             * Wait until the engine reaches the purchase stage.
+             */
+            await this.waitForEngineReady();
+
+            if (!this.running) return null;
+
+            /**
+             * Use the existing purchase method.
+             */
+            await this.tradeEngine.purchase(contractType);
+
+            /**
+             * Wait for the existing OpenContract handler
+             * to receive the result.
+             */
+            const result = await this.waitForContractResult();
+
+            if (!result) return null;
+
+            return {
+                symbol,
+                contractType,
+                entryDigit: Number(result.entryDigit || 0),
+                profit: Number(result.profit || 0),
+                result:
+                    Number(result.profit || 0) > 0
+                        ? 'profit'
+                        : 'loss',
+            };
+        } catch (error) {
+            console.error('[GOD] Trade execution failed:', error);
+            return null;
+        }
+    }
+
+    /**
+     * Wait for the existing engine to become ready.
+     */
+    private async waitForEngineReady(): Promise<void> {
+        const maxWait = 15000;
+        const started = Date.now();
+
+        while (this.running) {
+            const scope = this.tradeEngine.store?.getState?.()?.scope;
+
+            if (
+                scope === 'BEFORE_PURCHASE' ||
+                String(scope).includes('BEFORE_PURCHASE')
+            ) {
+                return;
+            }
+
+            if (Date.now() - started >= maxWait) {
+                throw new Error(
+                    'Existing TradeEngine did not become ready.'
+                );
+            }
+
+            await this.delay(250);
+        }
+    }
+
+    /**
+     * Wait for the existing contract state to close.
+     */
+    private async waitForContractResult(): Promise<any> {
+        const maxWait = 120000;
+        const started = Date.now();
+
+        while (this.running) {
+            const contract = this.tradeEngine.data?.contract;
+
+            if (contract && contract.is_sold) {
+                return {
+                    entryDigit:
+                        contract.entry_tick_display ??
+                        contract.entry_tick ??
+                        0,
+                    profit: Number(
+                        contract.profit ??
+                        contract.sell_price -
+                            contract.buy_price ??
+                        0
+                    ),
+                };
+            }
+
+            if (Date.now() - started >= maxWait) {
+                throw new Error(
+                    'Timed out waiting for contract result.'
+                );
+            }
+
+            await this.delay(250);
+        }
+
+        return null;
+    }
+
+    /**
+     * Synthetic-index detection.
+     */
+    private isSynthetic(
+        symbol: string,
+        name: string
+    ): boolean {
+        const text =
+            `${symbol} ${name}`.toLowerCase();
 
         return (
-          market.includes('synthetic') ||
-          /^1HZ|^R_/.test(symbol)
+            text.includes('volatility') ||
+            text.includes('boom') ||
+            text.includes('crash') ||
+            text.includes('step') ||
+            text.includes('jump') ||
+            text.includes('range') ||
+            text.includes('drift') ||
+            text.includes('bear') ||
+            text.includes('bull') ||
+            symbol.startsWith('1HZ')
         );
-      })
-      .slice(0, this.config.maxMarketsToScan ?? 15);
-  }
-
-  private async getDigits(
-    symbol: string,
-    count: number,
-  ): Promise<number[]> {
-    const response = await this.request<any>({
-      ticks_history: symbol,
-      style: 'ticks',
-      count,
-      end: 'latest',
-    });
-
-    const prices = response.history?.prices;
-
-    if (!Array.isArray(prices)) return [];
-
-    return prices
-      .map((price: string | number) => {
-        const text = String(price);
-        const last = text.replace(/\D/g, '').slice(-1);
-
-        return Number(last);
-      })
-      .filter(Number.isInteger);
-  }
-
-  private score(
-    symbol: any,
-    digits: number[],
-  ): MarketScore | null {
-    if (
-      digits.length <
-      (this.config.minimumSampleSize ?? 50)
-    ) {
-      return null;
     }
 
-    const evens = digits.filter(
-      (d) => d % 2 === 0,
-    ).length;
+    /**
+     * Extract the final digit from a quote.
+     */
+    private extractLastDigit(
+        price: number,
+        symbol: string
+    ): number {
+        const pipSize =
+            this.tradeEngine.$scope?.ticksService?.pipSizes?.[
+                symbol
+            ] ?? 2;
 
-    const odds = digits.length - evens;
+        const formatted = Number(price).toFixed(pipSize);
 
-    const evenRate = evens / digits.length;
-    const oddRate = odds / digits.length;
-
-    // This is a descriptive confidence score,
-    // not a guarantee of future accuracy.
-    const parityEdge = Math.abs(
-      evenRate - oddRate,
-    );
-
-    const recent = digits.slice(-20);
-
-    const recentEvens = recent.filter(
-      (d) => d % 2 === 0,
-    ).length;
-
-    const recentOdds =
-      recent.length - recentEvens;
-
-    const recentEdge = recent.length
-      ? Math.abs(
-          recentEvens / recent.length -
-            recentOdds / recent.length,
-        )
-      : 0;
-
-    const confidence = Math.min(
-      this.config.maxConfidence ?? 0.90,
-      0.50 +
-        parityEdge * 0.35 +
-        recentEdge * 0.15,
-    );
-
-    const score =
-      parityEdge * 0.55 +
-      recentEdge * 0.25 +
-      Math.min(digits.length / 100, 1) * 0.20;
-
-    return {
-      symbol: symbol.symbol,
-      name: symbol.display_name || symbol.symbol,
-      sampleSize: digits.length,
-      evenRate,
-      oddRate,
-      confidence,
-      score,
-      lastDigits: digits.slice(-20),
-    };
-  }
-
-  private async scan(): Promise<MarketScore | null> {
-    this.emitStatus(
-      'Scanning synthetic-index markets...',
-    );
-
-    const markets =
-      await this.getSyntheticMarkets();
-
-    const scored: MarketScore[] = [];
-
-    for (const market of markets) {
-      if (this.stopped) return null;
-
-      try {
-        const digits = await this.getDigits(
-          market.symbol,
-          this.config.scanWindow ?? 100,
-        );
-
-        const result = this.score(
-          market,
-          digits,
-        );
-
-        if (result) {
-          scored.push(result);
-          this.events.onMarket?.(result);
-        }
-      } catch (error) {
-        this.emitStatus(
-          `Skipped ${market.symbol}: ${
-            error instanceof Error
-              ? error.message
-              : String(error)
-          }`,
-        );
-      }
+        return Number(formatted.slice(-1));
     }
 
-    scored.sort(
-      (a, b) => b.score - a.score,
-    );
+    /**
+     * Measure streak behaviour.
+     */
+    private calculateStreakScore(
+        digits: number[]
+    ): number {
+        if (digits.length < 4) return 0;
 
-    const best = scored[0];
+        let total = 0;
+        let matches = 0;
 
-    if (
-      !best ||
-      best.confidence <
-        (this.config.minimumConfidence ?? 0.70)
-    ) {
-      this.emitStatus(
-        'No market met the configured confidence threshold. No trade opened.',
-      );
+        for (let i = 1; i < digits.length; i += 1) {
+            const previousParity = digits[i - 1] % 2;
+            const currentParity = digits[i] % 2;
 
-      return null;
+            total += 1;
+
+            if (previousParity === currentParity) {
+                matches += 1;
+            }
+        }
+
+        return total ? matches / total : 0;
     }
 
-    this.emitStatus(
-      `Selected ${best.symbol} — observed even ${(
-        best.evenRate * 100
-      ).toFixed(1)}%, odd ${(
-        best.oddRate * 100
-      ).toFixed(1)}%, confidence ${(
-        best.confidence * 100
-      ).toFixed(1)}%.`,
-    );
+    /**
+     * Measure short-term stability.
+     */
+    private calculateStability(
+        digits: number[]
+    ): number {
+        if (digits.length < 20) return 0;
 
-    return best;
-  }
+        const first = digits.slice(0, 20);
+        const last = digits.slice(-20);
 
-  private async waitForTrigger(
-    symbol: string,
-  ): Promise<{
-    type: 'DIGITEVEN' | 'DIGITODD';
-    digit: number;
-  }> {
-    this.emitStatus(
-      `Watching ${symbol} for 3 consecutive opposite-parity digits...`,
-    );
+        const firstEven =
+            first.filter(digit => digit % 2 === 0).length /
+            first.length;
 
-    return new Promise((resolve, reject) => {
-      if (!this.ws) {
-        return reject(
-          new Error('WebSocket is not connected.'),
+        const lastEven =
+            last.filter(digit => digit % 2 === 0).length /
+            last.length;
+
+        return Math.max(
+            0,
+            1 - Math.abs(firstEven - lastEven)
         );
-      }
+    }
 
-      const reqId = Math.floor(
-        Math.random() * 2_000_000_000,
-      );
-
-      let subscriptionId: string | undefined;
-      let oppositeRun = 0;
-
-      let lastParity:
-        | 'even'
-        | 'odd'
-        | null = null;
-
-      const finish = (
-        value?: {
-          type: 'DIGITEVEN' | 'DIGITODD';
-          digit: number;
-        },
-        error?: Error,
-      ) => {
-        if (subscriptionId) {
-          try {
-            this.ws?.send(
-              JSON.stringify({
-                forget: subscriptionId,
-              }),
-            );
-          } catch {}
-        }
-
-        this.ws?.removeEventListener(
-          'message',
-          handler,
-        );
-
-        if (error) {
-          reject(error);
-        } else if (value) {
-          resolve(value);
-        }
-      };
-
-      const handler = (
-        event: MessageEvent,
-      ) => {
-        let msg: DerivMessage;
-
-        try {
-          msg = JSON.parse(event.data);
-        } catch {
-          return;
+    private shouldStop(): boolean {
+        if (
+            this.config.targetProfit > 0 &&
+            this.currentProfit >= this.config.targetProfit
+        ) {
+            this.stopReason = 'Target profit reached.';
+            return true;
         }
 
         if (
-          msg.req_id === reqId &&
-          msg.error
+            this.config.stopLoss > 0 &&
+            this.currentProfit <= -Math.abs(this.config.stopLoss)
         ) {
-          finish(
-            undefined,
-            new Error(
-              msg.error.message ||
-                'Tick subscription failed',
-            ),
-          );
-
-          return;
+            this.stopReason = 'Stop loss reached.';
+            return true;
         }
 
-        if (msg.subscription?.id) {
-          subscriptionId =
-            msg.subscription.id;
-        }
-
-        if (msg.msg_type !== 'tick') return;
-
-        const quote = msg.tick?.quote;
-
-        if (quote === undefined) return;
-
-        const digit = Number(
-          String(quote)
-            .replace(/\D/g, '')
-            .slice(-1),
-        );
-
-        if (!Number.isInteger(digit)) return;
-
-        const parity:
-          | 'even'
-          | 'odd' =
-          digit % 2 === 0
-            ? 'even'
-            : 'odd';
-
-        if (lastParity === parity) {
-          oppositeRun += 1;
-        } else {
-          lastParity = parity;
-          oppositeRun = 1;
-        }
-
-        if (oppositeRun >= 3) {
-          // Three odds -> EVEN.
-          // Three evens -> ODD.
-          finish({
-            type:
-              parity === 'odd'
-                ? 'DIGITEVEN'
-                : 'DIGITODD',
-            digit,
-          });
-        }
-      };
-
-      this.ws.addEventListener(
-        'message',
-        handler,
-      );
-
-      this.ws.send(
-        JSON.stringify({
-          ticks: symbol,
-          subscribe: 1,
-          req_id: reqId,
-        }),
-      );
-    });
-  }
-
-  private async executeTrade(
-    market: MarketScore,
-    trigger: {
-      type: 'DIGITEVEN' | 'DIGITODD';
-      digit: number;
-    },
-  ): Promise<GodTradeResult> {
-    const proposal =
-      await this.request<any>({
-        proposal: 1,
-        amount: this.config.stake,
-        basis: 'stake',
-        contract_type: trigger.type,
-        currency:
-          this.config.currency ?? 'USD',
-        duration:
-          this.config.duration ?? 1,
-        duration_unit: 't',
-        symbol: market.symbol,
-      });
-
-    const proposalId =
-      proposal.proposal?.id;
-
-    if (!proposalId) {
-      throw new Error(
-        'Deriv did not return a proposal id.',
-      );
+        return false;
     }
 
-    const buy =
-      await this.request<any>({
-        buy: proposalId,
-        price: this.config.stake,
-      });
+    /**
+     * Send requests through the EXISTING api_base connection.
+     */
+    private sendRequest(request: any): Promise<any> {
+        return new Promise((resolve, reject) => {
+            try {
+                const api = api_base.api;
 
-    const contractId =
-      buy.buy?.contract_id;
+                if (!api) {
+                    reject(
+                        new Error(
+                            'Deriv API is not initialized.'
+                        )
+                    );
+                    return;
+                }
 
-    if (!contractId) {
-      throw new Error(
-        'Deriv did not return a contract id.',
-      );
+                let requestId: any;
+
+                const timeout = window.setTimeout(() => {
+                    try {
+                        api.forget?.(requestId);
+                    } catch {
+                        // Ignore.
+                    }
+
+                    reject(
+                        new Error(
+                            'Deriv request timed out.'
+                        )
+                    );
+                }, 15000);
+
+                requestId = api.send(request);
+
+                const subscription = api.onMessage(
+                    (response: any) => {
+                        if (
+                            response?.msg_type === 'error'
+                        ) {
+                            window.clearTimeout(timeout);
+                            subscription?.unsubscribe?.();
+                            reject(
+                                new Error(
+                                    response.error?.message ||
+                                        'Deriv API error'
+                                )
+                            );
+                            return;
+                        }
+
+                        const matchesRequest =
+                            response?.echo_req &&
+                            Object.keys(request).some(
+                                key =>
+                                    response.echo_req[key] ===
+                                    request[key]
+                            );
+
+                        if (!matchesRequest) return;
+
+                        window.clearTimeout(timeout);
+                        subscription?.unsubscribe?.();
+
+                        resolve(response);
+                    }
+                );
+            } catch (error) {
+                reject(error);
+            }
+        });
     }
 
-    this.emitStatus(
-      `Trade executed: ${trigger.type} on ${market.symbol}, entry digit ${trigger.digit}.`,
-    );
-
-    return await this.waitForContract(
-      contractId,
-      market.symbol,
-      trigger,
-    );
-  }
-
-  private async waitForContract(
-    contractId: string | number,
-    symbol: string,
-    trigger: {
-      type: 'DIGITEVEN' | 'DIGITODD';
-      digit: number;
-    },
-  ): Promise<GodTradeResult> {
-    return new Promise(
-      (resolve, reject) => {
-        if (!this.ws) {
-          return reject(
-            new Error(
-              'WebSocket is not connected.',
-            ),
-          );
-        }
-
-        const reqId = Math.floor(
-          Math.random() * 2_000_000_000,
+    private delay(ms: number): Promise<void> {
+        return new Promise(resolve =>
+            window.setTimeout(resolve, ms)
         );
-
-        const handler = (
-          event: MessageEvent,
-        ) => {
-          let msg: DerivMessage;
-
-          try {
-            msg = JSON.parse(event.data);
-          } catch {
-            return;
-          }
-
-          if (
-            msg.req_id === reqId &&
-            msg.error
-          ) {
-            this.ws?.removeEventListener(
-              'message',
-              handler,
-            );
-
-            reject(
-              new Error(
-                msg.error.message ||
-                  'Contract stream failed',
-              ),
-            );
-
-            return;
-          }
-
-          if (
-            msg.msg_type !==
-            'proposal_open_contract'
-          ) {
-            return;
-          }
-
-          const poc =
-            msg.proposal_open_contract;
-
-          if (
-            String(poc?.contract_id) !==
-            String(contractId)
-          ) {
-            return;
-          }
-
-          if (!poc?.is_sold) return;
-
-          this.ws?.removeEventListener(
-            'message',
-            handler,
-          );
-
-          const profit = Number(
-            poc.profit ?? 0,
-          );
-
-          const won = profit > 0;
-
-          const result: GodTradeResult = {
-            symbol,
-            contractType:
-              trigger.type,
-            entryDigit:
-              trigger.digit,
-            status: won
-              ? 'won'
-              : 'lost',
-            profit,
-            contractId,
-            message: won
-              ? 'GOD ABOVE'
-              : 'GOD NEVER FAILS',
-          };
-
-          resolve(result);
-        };
-
-        this.ws.addEventListener(
-          'message',
-          handler,
-        );
-
-        this.ws.send(
-          JSON.stringify({
-            proposal_open_contract: 1,
-            contract_id: contractId,
-            subscribe: 1,
-            req_id: reqId,
-          }),
-        );
-      },
-    );
-  }
-
-  async start() {
-    if (this.running) {
-      throw new Error(
-        'GOD bot is already running.',
-      );
     }
-
-    this.running = true;
-    this.stopped = false;
-    this.cumulativeProfit = 0;
-
-    const maxRuns =
-      this.config.runs ?? 2;
-
-    try {
-      await this.connect();
-
-      for (
-        let run = 1;
-        run <= maxRuns;
-        run += 1
-      ) {
-        if (this.stopped) break;
-
-        if (
-          this.cumulativeProfit >=
-          this.config.targetProfit
-        ) {
-          this.emitStatus(
-            'Target profit reached. Bot stopped.',
-          );
-
-          break;
-        }
-
-        if (
-          this.cumulativeProfit <=
-          -Math.abs(
-            this.config.stopLoss,
-          )
-        ) {
-          this.emitStatus(
-            'Stop loss reached. Bot stopped.',
-          );
-
-          break;
-        }
-
-        this.emitStatus(
-          `Run ${run}/${maxRuns}: scanning...`,
-        );
-
-        const market =
-          await this.scan();
-
-        if (!market) continue;
-
-        const trigger =
-          await this.waitForTrigger(
-            market.symbol,
-          );
-
-        if (this.stopped) break;
-
-        const result =
-          await this.executeTrade(
-            market,
-            trigger,
-          );
-
-        this.cumulativeProfit +=
-          result.profit;
-
-        this.events.onTrade?.(
-          result,
-        );
-
-        this.events.onProfit?.(
-          this.cumulativeProfit,
-        );
-
-        if (
-          result.status === 'won'
-        ) {
-          this.emitStatus(
-            'GOD ABOVE',
-          );
-        } else {
-          this.emitStatus(
-            'GOD NEVER FAILS',
-          );
-        }
-      }
-    } catch (error) {
-      this.emitError(error);
-    } finally {
-      this.running = false;
-
-      this.ws?.close();
-      this.ws = null;
-
-      this.emitStatus(
-        'GOD bot stopped.',
-      );
-    }
-  }
-
-  stop() {
-    this.stopped = true;
-
-    this.emitStatus(
-      'Stopping GOD bot...',
-    );
-  }
 }
+
+export default GodBot;
