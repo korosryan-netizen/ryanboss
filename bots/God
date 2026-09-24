@@ -1,0 +1,75 @@
+This XML file does not appear to have any style information associated with it. The document tree is shown below.
+<god_bot>
+<metadata>
+<name>GOD</name>
+<version>1.0</version>
+<purpose>Automated Deriv Even/Odd digit-trading strategy configuration</purpose>
+<important_note> This bot does not guarantee 90% accuracy or profits. The scanner uses historical/live tick statistics as a heuristic and should be tested in demo mode before real trading. </important_note>
+</metadata>
+<settings>
+<contract_type>EVEN_ODD</contract_type>
+<default_runs>2</default_runs>
+<martingale_multiplier>1</martingale_multiplier>
+<auto_select_market>true</auto_select_market>
+<auto_execute>true</auto_execute>
+<default_scan_window>100</default_scan_window>
+<minimum_sample_size>50</minimum_sample_size>
+<minimum_signal_confidence>0.70</minimum_signal_confidence>
+<maximum_signal_confidence>0.90</maximum_signal_confidence>
+</settings>
+<user_inputs>
+<stake required="true" type="number"/>
+<target_profit required="true" type="number"/>
+<stop_loss required="true" type="number"/>
+<runs required="true" type="integer" default="2" min="1"/>
+</user_inputs>
+<scanner>
+<description> Scan eligible Deriv synthetic-index markets that support Even/Odd contracts. Rank markets using recent digit-frequency balance, parity frequency, streak behavior, sample size, and short-term stability. </description>
+<market_filter>
+<require_even_odd>true</require_even_odd>
+<exclude_insufficient_history>true</exclude_insufficient_history>
+</market_filter>
+<scoring>
+<digit_frequency_weight>0.35</digit_frequency_weight>
+<parity_frequency_weight>0.30</parity_frequency_weight>
+<streak_weight>0.20</streak_weight>
+<stability_weight>0.15</stability_weight>
+</scoring>
+<selection_rule> Select the highest-scoring eligible market only when its confidence threshold is met. If no market meets the threshold, do not trade and continue scanning. </selection_rule>
+</scanner>
+<strategy>
+<even_rule> Monitor incoming digits and count consecutive odd digits. When the configured trigger condition is met, select EVEN and execute the contract. </even_rule>
+<odd_rule> Monitor incoming digits and count consecutive even digits. When the configured trigger condition is met, select ODD and execute the contract. </odd_rule>
+<trigger>
+<required_consecutive_opposite_parity>3</required_consecutive_opposite_parity>
+</trigger>
+<execution>
+<use_selected_market>true</use_selected_market>
+<use_user_stake>true</use_user_stake>
+<martingale>false</martingale>
+<martingale_multiplier>1</martingale_multiplier>
+<max_runs_from_user_input>true</max_runs_from_user_input>
+<stop_on_target_profit>true</stop_on_target_profit>
+<stop_on_stop_loss>true</stop_on_stop_loss>
+</execution>
+</strategy>
+<risk_controls>
+<never_exceed_stop_loss>true</never_exceed_stop_loss>
+<never_continue_after_target_profit>true</never_continue_after_target_profit>
+<stop_if_market_data_disconnects>true</stop_if_market_data_disconnects>
+<stop_if_no_valid_signal>true</stop_if_no_valid_signal>
+</risk_controls>
+<logging>
+<log_trade>true</log_trade>
+<log_market>true</log_market>
+<log_contract>true</log_contract>
+<log_entry_digit>true</log_entry_digit>
+<log_result>true</log_result>
+<profit_message>GOD ABOVE</profit_message>
+<loss_message>GOD NEVER FAILS</loss_message>
+</logging>
+<integration>
+<website>https://ryanboss.netlify.app/</website>
+<api_requirement> Connect this configuration to the site's Deriv WebSocket/API execution layer. Authentication and trading authorization must be supplied by the account owner. </api_requirement>
+</integration>
+</god_bot>
