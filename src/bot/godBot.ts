@@ -59,6 +59,29 @@ export class GodBot {
             ...config,
             runs: Math.max(1, Number(config.runs || 2)),
             stake: Math.max(0, Number(config.stake || 0)),
+            targetProfit: Number(config.targetProfit || 0),
+            stopLoss: Number(config.stopLoss || 0),
+            scanWindow: Math.max(
+                20,
+                Number(config.scanWindow || DEFAULT_CONFIG.scanWindow)
+            ),
+            minimumSampleSize: Math.max(
+                20,
+                Number(
+                    config.minimumSampleSize ||
+                        DEFAULT_CONFIG.minimumSampleSize
+                )
+            ),
+            minimumConfidence: Math.min(
+                0.99,
+                Math.max(
+                    0,
+                    Number(
+                        config.minimumConfidence ||
+                            DEFAULT_CONFIG.minimumConfidence
+                    )
+                )
+            ),
         };
     }
 
@@ -72,19 +95,23 @@ export class GodBot {
         this.running = true;
         this.currentProfit = 0;
         this.tradesExecuted = 0;
+        this.selectedMarket = null;
         this.stopReason = '';
 
         try {
             for (let run = 0; run < this.config.runs; run += 1) {
                 if (!this.running || this.shouldStop()) break;
 
-                console.log(`[GOD] Starting run ${run + 1}/${this.config.runs}`);
+                console.log(
+                    `[GOD] Starting run ${run + 1}/${this.config.runs}`
+                );
 
                 const market = await this.scanMarkets();
 
                 if (!market) {
                     this.stopReason =
                         'No market reached the required confidence threshold.';
+                    console.log('[GOD] No qualifying market found.');
                     break;
                 }
 
@@ -108,11 +135,7 @@ export class GodBot {
                 this.currentProfit += result.profit;
                 this.tradesExecuted += 1;
 
-                if (result.profit > 0) {
-                    console.log('GOD ABOVE');
-                } else {
-                    console.log('GOD NEVER FAILS');
-                }
+                this.logTradeResult(result);
 
                 if (this.shouldStop()) break;
             }
@@ -127,6 +150,7 @@ export class GodBot {
     stop(): void {
         this.running = false;
         this.stopReason = 'Stopped by user.';
+        console.log('[GOD] Bot stopped.');
     }
 
     isRunning(): boolean {
@@ -180,7 +204,9 @@ export class GodBot {
                     market.display_name || market.symbol
                 );
 
-                if (result) scored.push(result);
+                if (result) {
+                    scored.push(result);
+                }
             } catch (error) {
                 console.warn(
                     `[GOD] Failed to analyse ${market.symbol}`,
@@ -225,6 +251,8 @@ export class GodBot {
             this.extractLastDigit(price, symbol)
         );
 
+        if (!digits.length) return null;
+
         const evenCount = digits.filter(
             digit => digit % 2 === 0
         ).length;
@@ -260,11 +288,11 @@ export class GodBot {
             this.calculateStability(digits);
 
         /*
-         * GOD XML weighting:
+         * GOD scoring:
          *
-         * Digit frequency: 35%
-         * Parity frequency: 30%
-         * Streak: 20%
+         * Parity frequency: 35%
+         * Recent parity frequency: 30%
+         * Streak behavior: 20%
          * Stability: 15%
          */
         const score =
@@ -289,6 +317,7 @@ export class GodBot {
     ): Promise<'DIGITEVEN' | 'DIGITODD' | null> {
         let consecutiveOdd = 0;
         let consecutiveEven = 0;
+
         let lastProcessedQuote: number | null = null;
 
         console.log(
@@ -311,10 +340,12 @@ export class GodBot {
                     continue;
                 }
 
-                const price = Number(prices[prices.length - 1]);
+                const price = Number(
+                    prices[prices.length - 1]
+                );
 
                 /*
-                 * Avoid counting the same tick repeatedly.
+                 * Do not process the exact same quote repeatedly.
                  */
                 if (lastProcessedQuote === price) {
                     await this.delay(1000);
@@ -375,18 +406,31 @@ export class GodBot {
         if (!this.running) return null;
 
         console.log(
-            `[GOD] Executing ${contractType} on ${symbol}`
+            `[GOD] Preparing ${contractType} on ${symbol}`
         );
 
         try {
             /*
-             * Reuse the SAME TradeEngine already created
-             * by the Deriv Bot application.
+             * Make sure the existing TradeEngine is watching
+             * the selected market.
              */
-            await this.tradeEngine.watchTicks(symbol);
+            this.tradeEngine.watchTicks(symbol);
 
             if (this.tradeEngine.options) {
-                this.tradeEngine.options.symbol = symbol;
+                this.tradeEngine.options = {
+                    ...this.tradeEngine.options,
+                    symbol,
+                };
+            }
+
+            /*
+             * Clear the previous contract reference.
+             *
+             * This prevents GOD from accidentally reading the
+             * result of an earlier completed trade.
+             */
+            if (this.tradeEngine.data) {
+                this.tradeEngine.data.contract = {};
             }
 
             const existingCurrency =
@@ -405,8 +449,13 @@ export class GodBot {
                 contract_type: contractType,
             };
 
+            console.log(
+                '[GOD] Starting TradeEngine:',
+                tradeOptions
+            );
+
             /*
-             * Let the existing TradeEngine prepare the contract.
+             * Let the existing TradeEngine prepare the trade.
              */
             this.tradeEngine.start(tradeOptions);
 
@@ -415,14 +464,26 @@ export class GodBot {
             if (!this.running) return null;
 
             /*
-             * Existing TradeEngine purchase.
+             * Capture the current contract ID before purchase.
+             * It should be empty because we cleared the previous
+             * contract above.
+             */
+            const previousContractId =
+                this.tradeEngine.data?.contract?.contract_id ||
+                null;
+
+            /*
+             * Execute through the existing TradeEngine.
              */
             await this.tradeEngine.purchase(contractType);
 
             /*
-             * Existing OpenContract system supplies the result.
+             * Wait for the NEW contract to appear and finish.
              */
-            const contract = await this.waitForContractResult();
+            const contract =
+                await this.waitForContractResult(
+                    previousContractId
+                );
 
             if (!contract) return null;
 
@@ -479,22 +540,57 @@ export class GodBot {
 
             await this.delay(250);
         }
+
+        throw new Error(
+            'GOD was stopped while preparing the trade.'
+        );
     }
 
-    private async waitForContractResult(): Promise<any> {
+    private async waitForContractResult(
+        previousContractId: string | number | null
+    ): Promise<any> {
         const timeout = 120000;
         const started = Date.now();
+
+        let newContractDetected = false;
 
         while (this.running) {
             const contract =
                 this.tradeEngine.data?.contract;
 
-            if (contract?.is_sold) {
+            const contractId =
+                contract?.contract_id ||
+                contract?.id ||
+                null;
+
+            /*
+             * Do not accept the previous contract.
+             */
+            if (
+                contract &&
+                contractId &&
+                contractId !== previousContractId
+            ) {
+                newContractDetected = true;
+            }
+
+            /*
+             * Only accept a completed result from the
+             * newly purchased contract.
+             */
+            if (
+                newContractDetected &&
+                contract?.is_sold
+            ) {
                 const profit = Number(
                     contract.profit ??
                     (
-                        Number(contract.sell_price || 0) -
-                        Number(contract.buy_price || 0)
+                        Number(
+                            contract.sell_price || 0
+                        ) -
+                        Number(
+                            contract.buy_price || 0
+                        )
                     )
                 );
 
@@ -504,6 +600,7 @@ export class GodBot {
                         contract.entry_tick ??
                         0,
                     profit,
+                    contractId,
                 };
             }
 
@@ -517,6 +614,39 @@ export class GodBot {
         }
 
         return null;
+    }
+
+    private logTradeResult(
+        result: GodTradeResult
+    ): void {
+        const message =
+            result.result === 'profit'
+                ? 'GOD ABOVE'
+                : 'GOD NEVER FAILS';
+
+        console.log(
+            `[GOD] ${message} | ` +
+                `${result.contractType} | ` +
+                `${result.symbol} | ` +
+                `Entry digit: ${result.entryDigit} | ` +
+                `Profit/Loss: ${result.profit}`
+        );
+
+        /*
+         * Also emit the result through the application's
+         * existing observer so the UI can listen for it.
+         */
+        try {
+            this.tradeEngine.observer?.emit?.(
+                'god.trade.result',
+                result
+            );
+        } catch (error) {
+            console.warn(
+                '[GOD] Could not emit UI trade result:',
+                error
+            );
+        }
     }
 
     private isSynthetic(
@@ -552,7 +682,9 @@ export class GodBot {
             Number(price).toFixed(pipSize);
 
         return Number(
-            formatted.charAt(formatted.length - 1)
+            formatted.charAt(
+                formatted.length - 1
+            )
         );
     }
 
@@ -563,7 +695,11 @@ export class GodBot {
 
         let sameParity = 0;
 
-        for (let i = 1; i < digits.length; i += 1) {
+        for (
+            let i = 1;
+            i < digits.length;
+            i += 1
+        ) {
             if (
                 digits[i] % 2 ===
                 digits[i - 1] % 2
@@ -598,9 +734,10 @@ export class GodBot {
 
         return Math.max(
             0,
-            1 - Math.abs(
-                firstEven - lastEven
-            )
+            1 -
+                Math.abs(
+                    firstEven - lastEven
+                )
         );
     }
 
@@ -612,6 +749,10 @@ export class GodBot {
         ) {
             this.stopReason =
                 'Target profit reached.';
+
+            console.log(
+                '[GOD] Target profit reached.'
+            );
 
             return true;
         }
@@ -626,16 +767,16 @@ export class GodBot {
             this.stopReason =
                 'Stop loss reached.';
 
+            console.log(
+                '[GOD] Stop loss reached.'
+            );
+
             return true;
         }
 
         return false;
     }
 
-    /**
-     * Uses the existing Deriv API connection.
-     * No new WebSocket is created.
-     */
     private async request(
         request: Record<string, any>
     ): Promise<any> {
