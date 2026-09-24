@@ -10,6 +10,7 @@ import main_xml from './xml/main.xml';
 import { forgetAccumulatorsProposalRequest } from './accumulators-proposal-handler';
 import { loadBlockly } from './blockly';
 import DBotStore from './dbot-store';
+import GodBot from '@/bot/godBot';
 import { isAllRequiredBlocksEnabled, updateDisabledBlocks, validateErrorOnBlockDelete } from './utils';
 
 class DBot {
@@ -19,6 +20,9 @@ class DBot {
         this.before_run_funcs = [];
         this.symbol = null;
         this.is_bot_running = false;
+
+        // GOD Even/Odd bot
+        this.godBot = null;
     }
 
     /**
@@ -31,6 +35,7 @@ class DBot {
 
         // eslint-disable-next-line @typescript-eslint/no-this-alias
         var that = this;
+
         window.Blockly.Blocks.trade_definition_tradetype.onchange = function (event) {
             if (!this.workspace || window.Blockly.derivWorkspace.isFlyoutVisible || this.workspace.isDragging()) {
                 return;
@@ -54,13 +59,17 @@ class DBot {
                     const category = this.getFieldValue('TRADETYPECAT_LIST');
                     const trade_type = this.getFieldValue('TRADETYPE_LIST');
                     const is_trade_type_accumulator = trade_type === 'accumulator';
-                    if (!is_trade_type_accumulator) forgetAccumulatorsProposalRequest(that);
+
+                    if (!is_trade_type_accumulator) {
+                        forgetAccumulatorsProposalRequest(that);
+                    }
 
                     if (is_symbol_list_change) {
                         contracts_for
                             ?.getTradeTypeCategories?.(market, submarket, symbol)
                             .then(categories => {
                                 const category_field = this.getField('TRADETYPECAT_LIST');
+
                                 if (category_field) {
                                     category_field.updateOptions(categories, {
                                         default_value: category,
@@ -70,10 +79,11 @@ class DBot {
                                 }
                             })
                             .catch(error => {
-                                // Error getting trade type categories
                                 console.error('Error fetching trade type categories:', error);
                             });
+
                         that.symbol = symbol;
+
                         if (
                             !that.is_bot_running &&
                             that.interpreter &&
@@ -81,7 +91,10 @@ class DBot {
                             symbol !== that.interpreter.bot.tradeEngine.symbol
                         ) {
                             const run_button = document.querySelector('#db-animation__run-button');
-                            if (run_button) run_button.disabled = true;
+
+                            if (run_button) {
+                                run_button.disabled = true;
+                            }
 
                             that.interpreter.unsubscribeFromTicksService().then(async () => {
                                 await that.interpreter?.bot.tradeEngine.watchTicks(symbol);
@@ -92,6 +105,7 @@ class DBot {
                             ?.getTradeTypes?.(market, submarket, symbol, category)
                             .then(trade_types => {
                                 const trade_type_field = this.getField('TRADETYPE_LIST');
+
                                 if (trade_type_field) {
                                     trade_type_field.updateOptions(trade_types, {
                                         default_value: trade_type,
@@ -101,7 +115,6 @@ class DBot {
                                 }
                             })
                             .catch(error => {
-                                // Error getting trade types
                                 console.error('Error fetching trade types:', error);
                             });
                     }
@@ -110,14 +123,17 @@ class DBot {
         };
 
         return new Promise((resolve, reject) => {
-            __webpack_public_path__ = public_path; // eslint-disable-line no-global-assign
+            __webpack_public_path__ = public_path;
             ApiHelpers.setInstance(api_helpers_store);
             DBotStore.setInstance(store);
+
             const window_width = window.innerWidth;
+
             try {
                 let workspaceScale = 0.7;
 
                 const { handleFileChange } = DBotStore.instance;
+
                 if (window_width < 1640) {
                     if (is_mobile) {
                         workspaceScale = 0.6;
@@ -127,7 +143,9 @@ class DBot {
                         workspaceScale = zoom_scale;
                     }
                 }
+
                 const el_scratch_div = document.getElementById('scratch_div');
+
                 if (!el_scratch_div) {
                     return;
                 }
@@ -136,23 +154,55 @@ class DBot {
                     media: `${window.__webpack_public_path__}assets/media/`,
                     renderer: 'zelos',
                     trashcan: !is_mobile,
-                    zoom: { wheel: true, startScale: workspaceScale },
+                    zoom: {
+                        wheel: true,
+                        startScale: workspaceScale,
+                    },
                     scrollbars: true,
                     theme: window.Blockly.Themes.zelos_renderer,
                 });
 
                 this.workspace.RTL = isDbotRTL();
 
-                this.workspace.cached_xml = { main: main_xml };
+                this.workspace.cached_xml = {
+                    main: main_xml,
+                };
 
-                this.workspace.addChangeListener(this.valueInputLimitationsListener.bind(this));
-                this.workspace.addChangeListener(event => updateDisabledBlocks(this.workspace, event));
-                this.workspace.addChangeListener(event => this.workspace.dispatchBlockEventEffects(event));
+                this.workspace.addChangeListener(
+                    this.valueInputLimitationsListener.bind(this)
+                );
+
+                this.workspace.addChangeListener(event =>
+                    updateDisabledBlocks(this.workspace, event)
+                );
+
+                this.workspace.addChangeListener(event =>
+                    this.workspace.dispatchBlockEventEffects(event)
+                );
+
                 this.workspace.addChangeListener(event => {
-                    if (event.type === 'drag' && !event.isStart && !is_mobile) validateErrorOnBlockDelete();
-                    if (event.type == window.Blockly.Events.BLOCK_CHANGE) {
-                        const block = this.workspace.getBlockById(event.blockId);
-                        if (is_mobile && block && event.element == 'collapsed') {
+                    if (
+                        event.type === 'drag' &&
+                        !event.isStart &&
+                        !is_mobile
+                    ) {
+                        validateErrorOnBlockDelete();
+                    }
+
+                    if (
+                        event.type ==
+                        window.Blockly.Events.BLOCK_CHANGE
+                    ) {
+                        const block =
+                            this.workspace.getBlockById(
+                                event.blockId
+                            );
+
+                        if (
+                            is_mobile &&
+                            block &&
+                            event.element == 'collapsed'
+                        ) {
                             block.contextMenu = false;
                         }
                     }
@@ -160,132 +210,247 @@ class DBot {
 
                 window.Blockly.derivWorkspace = this.workspace;
 
-                const varDB = new window.Blockly.Names('window');
-                varDB.variableMap = window.Blockly.derivWorkspace.getVariableMap();
+                const varDB =
+                    new window.Blockly.Names('window');
+
+                varDB.variableMap =
+                    window.Blockly.derivWorkspace.getVariableMap();
 
                 window.Blockly.JavaScript.variableDB_ = varDB;
 
-                this.addBeforeRunFunction(this.unselectBlocks.bind(this));
-                this.addBeforeRunFunction(this.disableStrayBlocks.bind(this));
-                this.addBeforeRunFunction(this.checkForErroredBlocks.bind(this));
-                this.addBeforeRunFunction(this.checkForRequiredBlocks.bind(this));
+                this.addBeforeRunFunction(
+                    this.unselectBlocks.bind(this)
+                );
 
-                // Push main.xml to workspace and reset the undo stack.
-                this.workspace.current_strategy_id = window.Blockly.utils.idGenerator.genUid();
+                this.addBeforeRunFunction(
+                    this.disableStrayBlocks.bind(this)
+                );
 
-                window.Blockly.derivWorkspace.strategy_to_load = main_xml;
-                window.Blockly.getMainWorkspace().strategy_to_load = main_xml;
-                window.Blockly.getMainWorkspace().RTL = isDbotRTL();
+                this.addBeforeRunFunction(
+                    this.checkForErroredBlocks.bind(this)
+                );
 
-                let file_name = config().default_file_name;
+                this.addBeforeRunFunction(
+                    this.checkForRequiredBlocks.bind(this)
+                );
+
+                this.workspace.current_strategy_id =
+                    window.Blockly.utils.idGenerator.genUid();
+
+                window.Blockly.derivWorkspace.strategy_to_load =
+                    main_xml;
+
+                window.Blockly.getMainWorkspace().strategy_to_load =
+                    main_xml;
+
+                window.Blockly.getMainWorkspace().RTL =
+                    isDbotRTL();
+
+                let file_name =
+                    config().default_file_name;
+
                 if (recent_files && recent_files.length) {
-                    const latest_file = recent_files[0];
-                    window.Blockly.derivWorkspace.strategy_to_load = latest_file.xml;
-                    window.Blockly.getMainWorkspace().strategy_to_load = latest_file.xml;
-                    file_name = latest_file.name;
-                    window.Blockly.derivWorkspace.current_strategy_id = latest_file.id;
-                    window.Blockly.getMainWorkspace().current_strategy_id = latest_file.id;
+                    const latest_file =
+                        recent_files[0];
+
+                    window.Blockly.derivWorkspace.strategy_to_load =
+                        latest_file.xml;
+
+                    window.Blockly.getMainWorkspace().strategy_to_load =
+                        latest_file.xml;
+
+                    file_name =
+                        latest_file.name;
+
+                    window.Blockly.derivWorkspace.current_strategy_id =
+                        latest_file.id;
+
+                    window.Blockly.getMainWorkspace().current_strategy_id =
+                        latest_file.id;
                 }
 
-                const event_group = `dbot-load${Date.now()}`;
-                window.Blockly.Events.setGroup(event_group);
+                const event_group =
+                    `dbot-load${Date.now()}`;
+
+                window.Blockly.Events.setGroup(
+                    event_group
+                );
+
                 window.Blockly.Xml.domToWorkspace(
-                    window.Blockly.utils.xml.textToDom(window.Blockly.derivWorkspace.strategy_to_load),
+                    window.Blockly.utils.xml.textToDom(
+                        window.Blockly.derivWorkspace.strategy_to_load
+                    ),
                     this.workspace
                 );
-                const { save_modal } = DBotStore.instance;
+
+                const { save_modal } =
+                    DBotStore.instance;
 
                 save_modal.updateBotName(file_name);
-                this.workspace.cleanUp(0, is_mobile ? 60 : 56);
+
+                this.workspace.cleanUp(
+                    0,
+                    is_mobile ? 60 : 56
+                );
+
                 this.workspace.clearUndo();
 
-                window.dispatchEvent(new Event('resize'));
-                window.addEventListener('dragover', DBot.handleDragOver);
-                window.addEventListener('drop', e => DBot.handleDropOver(e, handleFileChange));
-                // disable overflow
-                el_scratch_div.parentNode.style.overflow = 'hidden';
+                window.dispatchEvent(
+                    new Event('resize')
+                );
+
+                window.addEventListener(
+                    'dragover',
+                    DBot.handleDragOver
+                );
+
+                window.addEventListener(
+                    'drop',
+                    e =>
+                        DBot.handleDropOver(
+                            e,
+                            handleFileChange
+                        )
+                );
+
+                el_scratch_div.parentNode.style.overflow =
+                    'hidden';
+
                 resolve();
             } catch (error) {
-                // TODO: Handle error.
                 reject(error);
                 throw error;
             }
         });
     }
 
-    /** Compare stored strategy xml with currently running xml */
     isStrategyUpdated(current_xml_dom, recent_files) {
         if (recent_files && recent_files.length) {
-            const stored_strategy = recent_files.filter(
-                strategy => strategy?.id === this.workspace?.current_strategy_id
-            )?.[0];
+            const stored_strategy =
+                recent_files.filter(
+                    strategy =>
+                        strategy?.id ===
+                        this.workspace?.current_strategy_id
+                )?.[0];
+
             if (stored_strategy?.xml) {
-                const stored_strategy_xml = stored_strategy?.xml;
-                const current_xml = window.Blockly.Xml.domToText(current_xml_dom);
-                const is_same_strategy = compareXml(stored_strategy_xml, current_xml);
+                const stored_strategy_xml =
+                    stored_strategy?.xml;
+
+                const current_xml =
+                    window.Blockly.Xml.domToText(
+                        current_xml_dom
+                    );
+
+                const is_same_strategy =
+                    compareXml(
+                        stored_strategy_xml,
+                        current_xml
+                    );
+
                 if (is_same_strategy) {
                     return false;
                 }
             }
         }
+
         return true;
     }
 
-    /** Saves the current workspace to local storage
-     * and update saved status if strategy changes  */
     async saveRecentWorkspace() {
-        const current_xml_dom = this?.workspace ? Blockly?.Xml?.workspaceToDom(this.workspace) : null;
+        const current_xml_dom =
+            this?.workspace
+                ? Blockly?.Xml?.workspaceToDom(
+                      this.workspace
+                  )
+                : null;
+
         try {
-            const recent_files = await getSavedWorkspaces();
-            if (current_xml_dom && this.isStrategyUpdated(current_xml_dom, recent_files)) {
-                await saveWorkspaceToRecent(current_xml_dom, save_types.UNSAVED);
+            const recent_files =
+                await getSavedWorkspaces();
+
+            if (
+                current_xml_dom &&
+                this.isStrategyUpdated(
+                    current_xml_dom,
+                    recent_files
+                )
+            ) {
+                await saveWorkspaceToRecent(
+                    current_xml_dom,
+                    save_types.UNSAVED
+                );
             }
         } catch (error) {
-            globalObserver.emit('Error', error);
-            await saveWorkspaceToRecent(current_xml_dom, save_types.UNSAVED);
+            globalObserver.emit(
+                'Error',
+                error
+            );
+
+            await saveWorkspaceToRecent(
+                current_xml_dom,
+                save_types.UNSAVED
+            );
         }
     }
 
-    /**
-     * Allows you to add a function that needs to be executed before running the bot. Each
-     * function needs to return true in order for the bot to run.
-     * @param {Function} func Function to execute which returns true/false.
-     */
     addBeforeRunFunction(func) {
         this.before_run_funcs.push(func);
     }
 
     shouldRunBot() {
-        return this.before_run_funcs.every(func => !!func());
+        return this.before_run_funcs.every(
+            func => !!func()
+        );
     }
 
     async initializeInterpreter() {
         if (this.interpreter) {
             await this.interpreter.terminateSession();
         }
+
         this.interpreter = Interpreter();
     }
+
     /**
-     * Runs the bot. Does a sanity check before attempting to generate the
-     * JavaScript code that's fed to the interpreter.
+     * Normal Deriv Bot execution.
      */
     runBot() {
         if (api_base.is_stopping) return;
 
         try {
             api_base.is_stopping = false;
-            const code = this.generateCode();
-            if (!this.interpreter.bot.tradeEngine.checkTicksPromiseExists()) this.interpreter = Interpreter();
+
+            const code =
+                this.generateCode();
+
+            if (
+                !this.interpreter.bot.tradeEngine
+                    .checkTicksPromiseExists()
+            ) {
+                this.interpreter =
+                    Interpreter();
+            }
 
             this.is_bot_running = true;
 
             api_base.setIsRunning(true);
-            this.interpreter.run(code).catch(error => {
-                globalObserver.emit('Error', error);
-                this.stopBot();
-            });
+
+            this.interpreter
+                .run(code)
+                .catch(error => {
+                    globalObserver.emit(
+                        'Error',
+                        error
+                    );
+
+                    this.stopBot();
+                });
         } catch (error) {
-            globalObserver.emit('Error', error);
+            globalObserver.emit(
+                'Error',
+                error
+            );
 
             if (this.interpreter) {
                 this.stopBot();
@@ -294,8 +459,137 @@ class DBot {
     }
 
     /**
+     * Starts the GOD Even/Odd bot.
+     *
+     * GOD uses the existing Interpreter TradeEngine
+     * and the existing api_base connection.
+     *
+     * It does NOT create another Deriv WebSocket.
+     */
+    async runGodBot(options = {}) {
+        if (api_base.is_stopping) return;
+
+        try {
+            if (!this.interpreter) {
+                this.interpreter =
+                    Interpreter();
+            }
+
+            const tradeEngine =
+                this.interpreter.bot.tradeEngine;
+
+            if (!tradeEngine) {
+                throw new Error(
+                    'GOD could not access the existing TradeEngine.'
+                );
+            }
+
+            if (
+                !api_base.api ||
+                !api_base.is_authorized
+            ) {
+                throw new Error(
+                    'Please connect and authorize your Deriv account first.'
+                );
+            }
+
+            api_base.is_stopping = false;
+            api_base.setIsRunning(true);
+
+            this.is_bot_running = true;
+
+            const godConfig = {
+                stake: Number(
+                    options.stake || 1
+                ),
+
+                targetProfit: Number(
+                    options.targetProfit || 0
+                ),
+
+                stopLoss: Number(
+                    options.stopLoss || 0
+                ),
+
+                runs: Number(
+                    options.runs || 2
+                ),
+
+                scanWindow: Number(
+                    options.scanWindow || 100
+                ),
+
+                minimumSampleSize: Number(
+                    options.minimumSampleSize || 50
+                ),
+
+                minimumConfidence: Number(
+                    options.minimumConfidence || 0.70
+                ),
+            };
+
+            console.log(
+                '[GOD] Starting GOD bot',
+                godConfig
+            );
+
+            this.godBot =
+                new GodBot(
+                    tradeEngine,
+                    godConfig
+                );
+
+            const result =
+                await this.godBot.start();
+
+            this.is_bot_running = false;
+
+            api_base.setIsRunning(false);
+
+            return result;
+        } catch (error) {
+            console.error(
+                '[GOD] Failed to start:',
+                error
+            );
+
+            this.is_bot_running = false;
+
+            api_base.setIsRunning(false);
+
+            globalObserver.emit(
+                'Error',
+                error
+            );
+
+            throw error;
+        }
+    }
+
+    /**
+     * Stops GOD.
+     */
+    async stopGodBot() {
+        try {
+            if (this.godBot) {
+                this.godBot.stop();
+            }
+
+            this.godBot = null;
+
+            api_base.setIsRunning(false);
+
+            this.is_bot_running = false;
+        } catch (error) {
+            console.error(
+                '[GOD] Failed to stop:',
+                error
+            );
+        }
+    }
+
+    /**
      * Generates the code that is passed to the interpreter.
-     * @param {Object} limitations Optional limitations (legacy argument)
      */
     generateCode(limitations = {}) {
         return `
@@ -308,7 +602,6 @@ class DBot {
             var BinaryBotPrivateTickAnalysisList = [];
             var BinaryBotPrivateHasCalledTradeOptions = false;
 
-           
             function recursiveList(list, final_list){
                 for(var i=0; i < list.length; i++){
                     if(typeof(list[i]) === 'object'){
@@ -316,7 +609,6 @@ class DBot {
                     }
                     if(typeof(list[i]) == 'number'){
                         final_list.push(list[i]);   
-                                  
                     }
                 }
                 return final_list;
@@ -326,74 +618,153 @@ class DBot {
                 if (f) return f(arg);
                 return false;
             }
+
             function BinaryBotPrivateTickAnalysis() {
-                var currentTickTime = Bot.getLastTick(true);
-                while (currentTickTime === 'MarketIsClosed') {
+                var currentTickTime =
+                    Bot.getLastTick(true);
+
+                while (
+                    currentTickTime ===
+                    'MarketIsClosed'
+                ) {
                     sleep(5);
-                    currentTickTime = Bot.getLastTick(true);
+                    currentTickTime =
+                        Bot.getLastTick(true);
                 }
-                currentTickTime = currentTickTime.epoch;
-                if (currentTickTime === BinaryBotPrivateLastTickTime) {
+
+                currentTickTime =
+                    currentTickTime.epoch;
+
+                if (
+                    currentTickTime ===
+                    BinaryBotPrivateLastTickTime
+                ) {
                     return;
                 }
-                BinaryBotPrivateLastTickTime = currentTickTime;
-                for (var BinaryBotPrivateI = 0; BinaryBotPrivateI < BinaryBotPrivateTickAnalysisList.length; BinaryBotPrivateI++) {
-                    BinaryBotPrivateRun(BinaryBotPrivateTickAnalysisList[BinaryBotPrivateI]);
+
+                BinaryBotPrivateLastTickTime =
+                    currentTickTime;
+
+                for (
+                    var BinaryBotPrivateI = 0;
+                    BinaryBotPrivateI <
+                    BinaryBotPrivateTickAnalysisList.length;
+                    BinaryBotPrivateI++
+                ) {
+                    BinaryBotPrivateRun(
+                        BinaryBotPrivateTickAnalysisList[
+                            BinaryBotPrivateI
+                        ]
+                    );
                 }
             }
-            var BinaryBotPrivateLimitations = ${JSON.stringify(limitations)};
+
+            var BinaryBotPrivateLimitations =
+                ${JSON.stringify(limitations)};
+
             ${window.Blockly.JavaScript.javascriptGenerator.workspaceToCode(this.workspace)}
-            BinaryBotPrivateRun(BinaryBotPrivateInit);
+
+            BinaryBotPrivateRun(
+                BinaryBotPrivateInit
+            );
+
             while (true) {
                 BinaryBotPrivateTickAnalysis();
-                BinaryBotPrivateRun(BinaryBotPrivateStart);
+
+                BinaryBotPrivateRun(
+                    BinaryBotPrivateStart
+                );
+
                 if (!BinaryBotPrivateHasCalledTradeOptions) {
                     sleep(1);
                     continue;
                 }
+
                 while (watch('before')) {
                     BinaryBotPrivateTickAnalysis();
-                    BinaryBotPrivateRun(BinaryBotPrivateBeforePurchase);
+
+                    BinaryBotPrivateRun(
+                        BinaryBotPrivateBeforePurchase
+                    );
                 }
+
                 while (watch('during')) {
                     BinaryBotPrivateTickAnalysis();
-                    BinaryBotPrivateRun(BinaryBotPrivateDuringPurchase);
+
+                    BinaryBotPrivateRun(
+                        BinaryBotPrivateDuringPurchase
+                    );
                 }
+
                 BinaryBotPrivateTickAnalysis();
-                if (!BinaryBotPrivateRun(BinaryBotPrivateAfterPurchase)) {
+
+                if (
+                    !BinaryBotPrivateRun(
+                        BinaryBotPrivateAfterPurchase
+                    )
+                ) {
                     break;
                 }
             }
-            
-            `;
+        `;
     }
 
     /**
-     * Instructs the interpreter to stop the bot. If there is an active trade
-     * that trade will be completed first to reflect correct contract status in UI.
+     * Stops the currently running bot.
+     *
+     * This also stops GOD if GOD is active.
      */
     async stopBot() {
         if (api_base.is_stopping) return;
 
+        api_base.is_stopping = true;
         api_base.setIsRunning(false);
 
-        await this.interpreter.stop();
+        if (this.godBot) {
+            await this.stopGodBot();
+            this.godBot = null;
+        }
+
+        if (this.interpreter) {
+            await this.interpreter.stop();
+        }
+
         this.is_bot_running = false;
+
         this.interpreter = null;
         this.interpreter = Interpreter();
-        await this.interpreter.bot.tradeEngine.watchTicks(this.symbol);
-        forgetAccumulatorsProposalRequest(this);
+
+        if (this.symbol) {
+            await this.interpreter.bot.tradeEngine.watchTicks(
+                this.symbol
+            );
+        }
+
+        forgetAccumulatorsProposalRequest(
+            this
+        );
     }
 
     /**
-     * Immediately instructs the interpreter to terminate the WS connection and bot.
+     * Immediately terminates the bot session.
      */
     async terminateBot() {
+        if (this.godBot) {
+            await this.stopGodBot();
+            this.godBot = null;
+        }
+
         if (this.interpreter) {
             await this.interpreter.terminateSession();
+
             this.interpreter = null;
             this.interpreter = Interpreter();
-            await this.interpreter.bot.tradeEngine.watchTicks(this.symbol);
+
+            if (this.symbol) {
+                await this.interpreter.bot.tradeEngine.watchTicks(
+                    this.symbol
+                );
+            }
         }
     }
 
@@ -401,248 +772,419 @@ class DBot {
         api_base.terminate();
     };
 
-    /**
-     * Unselects any selected block before running the bot.
-     */
-    // eslint-disable-next-line class-methods-use-this
     unselectBlocks() {
         if (window.Blockly.getSelected()) {
             window.Blockly.getSelected().unselect();
         }
+
         return true;
     }
 
-    /**
-     * Disable blocks outside of any main or independent blocks.
-     */
     disableStrayBlocks() {
-        const top_blocks = this.workspace.getTopBlocks();
+        const top_blocks =
+            this.workspace.getTopBlocks();
+
         top_blocks.forEach(block => {
-            if (!block.isMainBlock() && !block.isIndependentBlock()) {
-                this.disableBlocksRecursively(block);
+            if (
+                !block.isMainBlock() &&
+                !block.isIndependentBlock()
+            ) {
+                this.disableBlocksRecursively(
+                    block
+                );
             }
         });
+
         return true;
     }
 
-    /**
-     * Disable blocks and their optional children.
-     */
     disableBlocksRecursively(block) {
         block.setDisabled(true);
-        if (block.nextConnection?.targetConnection) {
-            this.disableBlocksRecursively(block.nextConnection.targetConnection.sourceBlock_);
+
+        if (
+            block.nextConnection?.targetConnection
+        ) {
+            this.disableBlocksRecursively(
+                block.nextConnection
+                    .targetConnection
+                    .sourceBlock_
+            );
         }
     }
 
-    /**
-     * Check if there are any blocks highlighted for errors.
-     */
     checkForErroredBlocks() {
-        // Force a check on value inputs.
-        this.valueInputLimitationsListener({}, true);
+        this.valueInputLimitationsListener(
+            {},
+            true
+        );
 
-        const all_blocks = this.workspace.getAllBlocks(true);
-        const error_blocks = all_blocks
-            .filter(block => block.is_error_highlighted && !block.disabled)
-            // filter out duplicated error message
-            .filter((block, index, self) => index === self.findIndex(b => b.error_message === block.error_message));
+        const all_blocks =
+            this.workspace.getAllBlocks(true);
+
+        const error_blocks =
+            all_blocks
+                .filter(
+                    block =>
+                        block.is_error_highlighted &&
+                        !block.disabled
+                )
+                .filter(
+                    (block, index, self) =>
+                        index ===
+                        self.findIndex(
+                            b =>
+                                b.error_message ===
+                                block.error_message
+                        )
+                );
 
         if (!error_blocks.length) {
             return true;
         }
 
-        this.workspace.centerOnBlock(error_blocks[0].id);
+        this.workspace.centerOnBlock(
+            error_blocks[0].id
+        );
+
         error_blocks.forEach(block => {
-            globalObserver.emit('ui.log.error', block.error_message);
+            globalObserver.emit(
+                'ui.log.error',
+                block.error_message
+            );
         });
 
         return false;
     }
 
-    centerAndHighlightBlock(block_id, should_animate = false) {
-        const block_to_highlight = this.workspace.getBlockById(block_id);
+    centerAndHighlightBlock(
+        block_id,
+        should_animate = false
+    ) {
+        const block_to_highlight =
+            this.workspace.getBlockById(
+                block_id
+            );
 
         if (!block_to_highlight) {
             return;
         }
 
-        const all_blocks = this.workspace.getAllBlocks();
+        const all_blocks =
+            this.workspace.getAllBlocks();
 
-        all_blocks.forEach(block => block.setErrorHighlighted(false));
+        all_blocks.forEach(block =>
+            block.setErrorHighlighted(false)
+        );
+
         if (should_animate) {
             block_to_highlight.blink();
         }
-        block_to_highlight.setErrorHighlighted(true);
 
-        this.workspace.centerOnBlock(block_to_highlight.id);
+        block_to_highlight.setErrorHighlighted(
+            true
+        );
+
+        this.workspace.centerOnBlock(
+            block_to_highlight.id
+        );
     }
 
     unHighlightAllBlocks() {
-        this.workspace?.getAllBlocks().forEach(block => block.setErrorHighlighted(false));
+        this.workspace
+            ?.getAllBlocks()
+            .forEach(block =>
+                block.setErrorHighlighted(false)
+            );
     }
 
-    /**
-     * Checks whether the workspace contains all required blocks before running the strategy.
-     */
     checkForRequiredBlocks() {
-        return isAllRequiredBlocksEnabled(this.workspace);
+        return isAllRequiredBlocksEnabled(
+            this.workspace
+        );
     }
 
-    /**
-     * Checks all blocks in the workspace to see if they need to be highlighted
-     * in case one of their inputs is not populated, returns an empty value, or doesn't
-     * pass the custom validator.
-     * Note: The value passed to the custom validator is always a string value
-     * @param {window.Blockly.Event} event Workspace event
-     */
-    valueInputLimitationsListener(event, force_check = false) {
-        if (!force_check && (!this.workspace || this.workspace.isDragging())) {
+    valueInputLimitationsListener(
+        event,
+        force_check = false
+    ) {
+        if (
+            !force_check &&
+            (
+                !this.workspace ||
+                this.workspace.isDragging()
+            )
+        ) {
             return;
         }
 
-        window.Blockly.JavaScript.javascriptGenerator.init(this.workspace);
+        window.Blockly.JavaScript.javascriptGenerator.init(
+            this.workspace
+        );
 
         if (force_check) {
             window.Blockly.hideChaff(false);
         }
 
-        const isGlobalEndDragEvent = () => event.type === window.Blockly.Events.BLOCK_DRAG && !event.isStart;
-        const isGlobalDeleteEvent = () => event.type === window.Blockly.Events.BLOCK_DELETE;
-        const isGlobalCreateEvent = () => event.type === window.Blockly.Events.BLOCK_CREATE;
+        const isGlobalEndDragEvent = () =>
+            event.type ===
+                window.Blockly.Events.BLOCK_DRAG &&
+            !event.isStart;
+
+        const isGlobalDeleteEvent = () =>
+            event.type ===
+            window.Blockly.Events.BLOCK_DELETE;
+
+        const isGlobalCreateEvent = () =>
+            event.type ===
+            window.Blockly.Events.BLOCK_CREATE;
+
         const isClickEvent = () =>
-            event.type === window.Blockly.Events.UI && (event.element === 'click' || event.element === 'selected');
-        const isChangeEvent = b => event.type === window.Blockly.Events.BLOCK_CHANGE && event.blockId === b.id;
+            event.type ===
+                window.Blockly.Events.UI &&
+            (
+                event.element === 'click' ||
+                event.element === 'selected'
+            );
+
+        const isChangeEvent = b =>
+            event.type ===
+                window.Blockly.Events.BLOCK_CHANGE &&
+            event.blockId === b.id;
+
         const isChangeInMyInputs = b => {
-            if (event.type === window.Blockly.Events.BLOCK_CHANGE) {
-                return b.inputList.some(input => {
-                    if (input.connection) {
-                        const target_block = input.connection.targetBlock();
-                        return target_block && event.blockId === target_block.id;
-                    }
-                    return false;
-                });
-            }
-            return false;
-        };
-        const isParentEnabledEvent = b => {
-            if (event.type === window.Blockly.Events.BLOCK_CHANGE && event.element === 'disabled') {
-                let parent_block = b.getParent();
-
-                while (parent_block !== null) {
-                    if (parent_block.id === event.blockId) {
-                        return true;
-                    }
-
-                    parent_block = parent_block.getParent();
-                }
-            }
-            return false;
-        };
-
-        this.workspace.getAllBlocks(true).forEach(block => {
             if (
-                force_check ||
-                isGlobalEndDragEvent() ||
-                isGlobalDeleteEvent() ||
-                isGlobalCreateEvent() ||
-                isClickEvent() ||
-                isChangeEvent(block) ||
-                isChangeInMyInputs(block) ||
-                isParentEnabledEvent(block)
+                event.type ===
+                window.Blockly.Events.BLOCK_CHANGE
             ) {
-                // Unhighlight disabled blocks and their optional children.
-                if (block.disabled) {
-                    const unhighlightRecursively = child_blocks => {
-                        child_blocks.forEach(child_block => {
-                            child_block.setErrorHighlighted(false);
-                            unhighlightRecursively(child_block.getChildren());
-                        });
-                    };
+                return b.inputList.some(
+                    input => {
+                        if (input.connection) {
+                            const target_block =
+                                input.connection.targetBlock();
 
-                    unhighlightRecursively([block]);
-                    return;
-                }
-
-                // No required inputs, ignore this block.
-                if (!block.getRequiredValueInputs) {
-                    return;
-                }
-
-                const required_inputs_object = block.getRequiredValueInputs();
-                const required_input_names = Object.keys(required_inputs_object);
-                const should_highlight = required_input_names.some(input_name => {
-                    const is_selected = window.Blockly.getSelected() === block; // Don't highlight selected blocks.
-                    const is_disabled = block.disabled || block.getInheritedDisabled(); // Don't highlight disabled blocks.
-
-                    if (is_selected || is_disabled) {
-                        return false;
-                    }
-
-                    // Don't unhighlight collapsed blocks with highlighted descendants.
-                    if (block.isCollapsed() && block.hasErrorHighlightedDescendant()) {
-                        return true;
-                    }
-
-                    const input = block.getInput(input_name);
-
-                    if (!input && !block.domToMutation) {
-                        // Detected a non-existent required input
-                    } else if (input && input?.connection) {
-                        const order = window.Blockly.JavaScript.javascriptGenerator.ORDER_ATOMIC;
-                        const value = window.Blockly.JavaScript.javascriptGenerator.valueToCode(
-                            block,
-                            input_name,
-                            order
-                        );
-                        const inputValidatorFn = required_inputs_object[input_name];
-
-                        // If a custom validator was supplied, use this to determine whether
-                        // the block should be highlighted.
-                        if (typeof inputValidatorFn === 'function') {
-                            return !!inputValidatorFn(value);
+                            return (
+                                target_block &&
+                                event.blockId ===
+                                    target_block.id
+                            );
                         }
 
-                        // If there's no custom validator, only check if input was populated and
-                        // doesn't return an empty value.
-                        return !value;
+                        return false;
+                    }
+                );
+            }
+
+            return false;
+        };
+
+        const isParentEnabledEvent = b => {
+            if (
+                event.type ===
+                    window.Blockly.Events.BLOCK_CHANGE &&
+                event.element === 'disabled'
+            ) {
+                let parent_block =
+                    b.getParent();
+
+                while (
+                    parent_block !== null
+                ) {
+                    if (
+                        parent_block.id ===
+                        event.blockId
+                    ) {
+                        return true;
                     }
 
-                    return true;
-                });
-
-                if (should_highlight) {
-                    // Remove select highlight in favour of error highlight.
-                    block.removeSelect();
-                }
-
-                block.setErrorHighlighted(should_highlight, block.error_message || undefined);
-
-                // Automatically expand blocks that have been highlighted.
-                if (force_check && (block.is_error_highlighted || block.hasErrorHighlightedDescendant())) {
-                    let current_collapsed_block = block;
-                    while (current_collapsed_block) {
-                        current_collapsed_block.setCollapsed(false);
-                        current_collapsed_block = current_collapsed_block.getParent();
-                    }
+                    parent_block =
+                        parent_block.getParent();
                 }
             }
-        });
+
+            return false;
+        };
+
+        this.workspace
+            .getAllBlocks(true)
+            .forEach(block => {
+                if (
+                    force_check ||
+                    isGlobalEndDragEvent() ||
+                    isGlobalDeleteEvent() ||
+                    isGlobalCreateEvent() ||
+                    isClickEvent() ||
+                    isChangeEvent(block) ||
+                    isChangeInMyInputs(block) ||
+                    isParentEnabledEvent(block)
+                ) {
+                    if (block.disabled) {
+                        const unhighlightRecursively =
+                            child_blocks => {
+                                child_blocks.forEach(
+                                    child_block => {
+                                        child_block.setErrorHighlighted(
+                                            false
+                                        );
+
+                                        unhighlightRecursively(
+                                            child_block.getChildren()
+                                        );
+                                    }
+                                );
+                            };
+
+                        unhighlightRecursively(
+                            [block]
+                        );
+
+                        return;
+                    }
+
+                    if (!block.getRequiredValueInputs) {
+                        return;
+                    }
+
+                    const required_inputs_object =
+                        block.getRequiredValueInputs();
+
+                    const required_input_names =
+                        Object.keys(
+                            required_inputs_object
+                        );
+
+                    const should_highlight =
+                        required_input_names.some(
+                            input_name => {
+                                const is_selected =
+                                    window.Blockly.getSelected() ===
+                                    block;
+
+                                const is_disabled =
+                                    block.disabled ||
+                                    block.getInheritedDisabled();
+
+                                if (
+                                    is_selected ||
+                                    is_disabled
+                                ) {
+                                    return false;
+                                }
+
+                                if (
+                                    block.isCollapsed() &&
+                                    block.hasErrorHighlightedDescendant()
+                                ) {
+                                    return true;
+                                }
+
+                                const input =
+                                    block.getInput(
+                                        input_name
+                                    );
+
+                                if (
+                                    !input &&
+                                    !block.domToMutation
+                                ) {
+                                    // Ignore.
+                                } else if (
+                                    input &&
+                                    input.connection
+                                ) {
+                                    const order =
+                                        window.Blockly.JavaScript
+                                            .javascriptGenerator
+                                            .ORDER_ATOMIC;
+
+                                    const value =
+                                        window.Blockly.JavaScript
+                                            .javascriptGenerator
+                                            .valueToCode(
+                                                block,
+                                                input_name,
+                                                order
+                                            );
+
+                                    const inputValidatorFn =
+                                        required_inputs_object[
+                                            input_name
+                                        ];
+
+                                    if (
+                                        typeof inputValidatorFn ===
+                                        'function'
+                                    ) {
+                                        return !!inputValidatorFn(
+                                            value
+                                        );
+                                    }
+
+                                    return !value;
+                                }
+
+                                return true;
+                            }
+                        );
+
+                    if (should_highlight) {
+                        block.removeSelect();
+                    }
+
+                    block.setErrorHighlighted(
+                        should_highlight,
+                        block.error_message ||
+                            undefined
+                    );
+
+                    if (
+                        force_check &&
+                        (
+                            block.is_error_highlighted ||
+                            block.hasErrorHighlightedDescendant()
+                        )
+                    ) {
+                        let current_collapsed_block =
+                            block;
+
+                        while (
+                            current_collapsed_block
+                        ) {
+                            current_collapsed_block.setCollapsed(
+                                false
+                            );
+
+                            current_collapsed_block =
+                                current_collapsed_block.getParent();
+                        }
+                    }
+                }
+            });
     }
 
-    /**
-     * Checks whether the workspace contains non-silent notification blocks. Returns array of names for audio files to be played.
-     */
     getStrategySounds() {
-        const all_blocks = this.workspace.getAllBlocks();
-        const notify_blocks = all_blocks.filter(block => block.type === 'notify');
+        const all_blocks =
+            this.workspace.getAllBlocks();
+
+        const notify_blocks =
+            all_blocks.filter(
+                block =>
+                    block.type === 'notify'
+            );
+
         const strategy_sounds = [];
 
         notify_blocks.forEach(block => {
-            const selected_sound = block.inputList[0].fieldRow[3].value_;
+            const selected_sound =
+                block.inputList[0]
+                    .fieldRow[3].value_;
 
-            if (selected_sound !== 'silent') {
-                strategy_sounds.push(selected_sound);
+            if (
+                selected_sound !==
+                'silent'
+            ) {
+                strategy_sounds.push(
+                    selected_sound
+                );
             }
         });
 
@@ -652,22 +1194,50 @@ class DBot {
     static handleDragOver(event) {
         event.stopPropagation();
         event.preventDefault();
-        event.dataTransfer.dropEffect = 'copy'; // eslint-disable-line no-param-reassign
+
+        event.dataTransfer.dropEffect =
+            'copy';
     }
 
-    static handleDropOver(event, handleFileChange) {
-        const main_workspace_dom = document.getElementById('scratch_div');
-        const local_drag_zone = document.getElementById('load-strategy__local-dropzone-area');
+    static handleDropOver(
+        event,
+        handleFileChange
+    ) {
+        const main_workspace_dom =
+            document.getElementById(
+                'scratch_div'
+            );
 
-        if (main_workspace_dom.contains(event.target)) {
+        const local_drag_zone =
+            document.getElementById(
+                'load-strategy__local-dropzone-area'
+            );
+
+        if (
+            main_workspace_dom.contains(
+                event.target
+            )
+        ) {
             handleFileChange(event);
-        } else if (local_drag_zone && local_drag_zone.contains(event.target)) {
-            handleFileChange(event, false);
+        } else if (
+            local_drag_zone &&
+            local_drag_zone.contains(
+                event.target
+            )
+        ) {
+            handleFileChange(
+                event,
+                false
+            );
         } else {
             event.stopPropagation();
             event.preventDefault();
-            event.dataTransfer.effectAllowed = 'none';
-            event.dataTransfer.dropEffect = 'none';
+
+            event.dataTransfer.effectAllowed =
+                'none';
+
+            event.dataTransfer.dropEffect =
+                'none';
         }
     }
 }
