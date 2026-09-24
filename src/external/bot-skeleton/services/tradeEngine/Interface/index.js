@@ -1,3 +1,4 @@
+
 import TradeEngine from '../trade';
 import getBotInterface from './BotInterface';
 import getTicksInterface from './TicksInterface';
@@ -18,8 +19,12 @@ const sleep = (observer, arg = 1) => {
 const Interface = $scope => {
     const tradeEngine = new TradeEngine($scope);
     const { observer } = $scope;
+
     const getInterface = () => {
         return {
+            // Expose the existing TradeEngine to other bot integrations
+            tradeEngine,
+
             ...getBotInterface(tradeEngine),
             ...getToolsInterface(tradeEngine),
             getTicksInterface: getTicksInterface(tradeEngine),
@@ -35,6 +40,7 @@ const Interface = $scope => {
             },
         };
     };
+
     return { tradeEngine, observer, getInterface };
 };
 
